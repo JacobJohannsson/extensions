@@ -107,7 +107,7 @@ struct TreeRefFarther {
 
 } // namespace
 
-// TOWNSW search (design.md, Section 12).
+// TOWNSW search (docs/design.md in the townsw repo, Section 4).
 //
 // The graph searched is the HNSW's lower layer plus one NSW per witness set, restricted to the
 // nodes whose witness passed the filter. Both edge kinds are read whenever a node is expanded;

@@ -146,7 +146,7 @@ struct UseKnn {
     static void validate(bool value);
 };
 
-// ---- TOWNSW (search_type := 'townsw'); see design.md, Section 12 ----
+// ---- TOWNSW (search_type := 'townsw'); see docs/design.md in the townsw repo ----
 
 // Projected graph whose query returns the selected witness nodes (e.g. venues). Without it,
 // every witness is selected.
