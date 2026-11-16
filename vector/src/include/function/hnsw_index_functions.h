@@ -78,6 +78,8 @@ struct QueryHNSWIndexBindData final : function::TableFuncBindData {
     QueryHNSWConfig config;
 
     std::shared_ptr<binder::BoundStatement> filterStatement;
+    // TOWNSW: the table whose nodes the filter returns, when it is not the indexed table.
+    catalog::TableCatalogEntry* witnessTableEntry = nullptr;
 
     explicit QueryHNSWIndexBindData(binder::expression_vector columns)
         : TableFuncBindData({std::move(columns), 1 /* maxOffset */}) {}
@@ -139,6 +141,13 @@ struct QueryVectorIndexFunction final {
 
     static constexpr const char* nnColumnName = "node";
     static constexpr const char* distanceColumnName = "distance";
+
+    static function::function_set getFunctionSet();
+};
+
+// Returns the work counters of the most recent vector search in this process, as one row.
+struct VectorSearchStatsFunction final {
+    static constexpr const char* name = "VECTOR_SEARCH_STATS";
 
     static function::function_set getFunctionSet();
 };

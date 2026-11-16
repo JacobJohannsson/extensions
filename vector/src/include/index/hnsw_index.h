@@ -9,6 +9,7 @@
 #include "index/hnsw_config.h"
 #include "index/hnsw_graph.h"
 #include "index/hnsw_index_utils.h"
+#include "index/townsw.h"
 #include "storage/index/index.h"
 #include <span>
 
@@ -317,6 +318,18 @@ struct HNSWSearchState {
     std::unique_ptr<graph::NbrScanState> nbrScanState;
     std::unique_ptr<graph::NbrScanState> secondHopNbrScanState;
 
+    // Work counters for the current search. metricFunc counts into it.
+    std::shared_ptr<VectorSearchStats> stats;
+
+    // TOWNSW (search_type 'townsw'). The mask is over the witness table, not the indexed
+    // table; null means every witness is selected.
+    common::SemiMask* witnessMask = nullptr;
+    std::shared_ptr<const TownswData> townsw;
+    catalog::TableCatalogEntry* witnessRelEntry = nullptr;
+    common::oid_t witnessRelTableID = common::INVALID_OID;
+    std::unique_ptr<graph::OnDiskGraph> witnessGraph;
+    std::unique_ptr<graph::NbrScanState> witnessNbrScanState;
+
     HNSWSearchState(main::ClientContext* context, catalog::TableCatalogEntry* nodeTableEntry,
         catalog::TableCatalogEntry* upperRelTableEntry,
         catalog::TableCatalogEntry* lowerRelTableEntry, storage::NodeTable& nodeTable,
@@ -400,6 +413,9 @@ private:
     std::vector<NodeWithDistance> searchBruteForce(transaction::Transaction* transaction,
         const EmbeddingHandle& approxQueryVector, const EmbeddingHandle& exactQueryVector,
         HNSWSearchState& searchState) const;
+    // Defined in townsw.cpp.
+    std::vector<NodeWithDistance> searchTownsw(transaction::Transaction* transaction,
+        const EmbeddingHandle& queryVector, HNSWSearchState& searchState) const;
     std::vector<NodeWithDistance> searchFromCheckpointed(transaction::Transaction* transaction,
         const EmbeddingHandle& queryVector, HNSWSearchState& searchState) const;
     void searchFromUnCheckpointed(transaction::Transaction* transaction,

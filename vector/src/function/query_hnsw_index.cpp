@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -8,13 +9,17 @@
 #include "catalog/catalog.h"
 #include "catalog/catalog_entry/node_table_catalog_entry.h"
 #include "catalog/hnsw_index_catalog_entry.h"
+#include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "common/exception/binder.h"
+#include "common/exception/runtime.h"
 #include "common/mask.h"
+#include "common/string_utils.h"
 #include "common/types/value/nested.h"
 #include "expression_evaluator/expression_evaluator_utils.h"
 #include "function/hnsw_index_functions.h"
 #include "function/table/bind_data.h"
 #include "graph/graph_entry_set.h"
+#include "graph/on_disk_graph.h"
 #include "index/hnsw_index.h"
 #include "index/hnsw_index_utils.h"
 #include "main/client_context.h"
@@ -71,7 +76,62 @@ std::unique_ptr<TableFuncBindData> QueryHNSWIndexBindData::copy() const {
     bindData->kExpression = kExpression;
     bindData->outputNode = outputNode;
     bindData->filterStatement = filterStatement;
+    bindData->witnessTableEntry = witnessTableEntry;
     return bindData;
+}
+
+// Binds the query of a projected graph that is used as a filter. Returns the bound statement and
+// the name of the node table whose nodes it returns.
+static std::pair<std::unique_ptr<BoundStatement>, std::string> bindFilterGraph(
+    main::ClientContext* context, const std::string& graphName) {
+    auto graphEntry = graph::GraphEntrySet::Get(*context)->getEntry(graphName);
+    std::string cypherQuery;
+    if (graphEntry->type == graph::GraphEntryType::NATIVE) {
+        auto& nativeEntry = graphEntry->cast<graph::ParsedNativeGraphEntry>();
+        if (!nativeEntry.relInfos.empty() || nativeEntry.nodeInfos.size() != 1) {
+            throw BinderException(std::format("In vector filtered search, projected graph {} "
+                                              "must contain exactly one node table.",
+                graphName));
+        }
+        auto nodeInfo = nativeEntry.nodeInfos[0];
+        cypherQuery = std::format("MATCH (n:`{}`) WHERE {} RETURN n", nodeInfo.tableName,
+            nodeInfo.predicate);
+    } else {
+        DASSERT(graphEntry->type == graph::GraphEntryType::CYPHER);
+        cypherQuery = graphEntry->cast<graph::ParsedCypherGraphEntry>().cypherQuery;
+    }
+    std::unique_ptr<BoundStatement> boundStatement;
+    try {
+        auto parsedStatements = parser::Parser::parseQuery(cypherQuery);
+        DASSERT(parsedStatements.size() == 1);
+        auto binder = Binder(context);
+        boundStatement = binder.bind(*parsedStatements[0]);
+    } catch (Exception& e) {
+        // LCOV_EXCL_START
+        throw BinderException{
+            std::format("Failed to bind the filter query. Found error: {}", e.what())};
+        // LCOV_EXCL_STOP
+    }
+    auto resultColumns = boundStatement->getStatementResult()->getColumns();
+    if (resultColumns.size() != 1) {
+        throw BinderException(
+            std::format("The return clause of a filter query should contain "
+                        "exactly one node expression. Found more than one expressions: {}.",
+                ExpressionUtil::toString(resultColumns)));
+    }
+    auto resultColumn = resultColumns[0];
+    if (resultColumn->getDataType().getLogicalTypeID() != LogicalTypeID::NODE) {
+        throw BinderException(std::format("The return clause of a filter query should be of "
+                                          "type NODE. Found type {} instead.",
+            resultColumn->getDataType().toString()));
+    }
+    auto& node = resultColumn->constCast<NodeExpression>();
+    if (node.getNumEntries() != 1) {
+        throw BinderException(std::format(
+            "Node {} in the return clause of the filter query should have one label.",
+            node.toString()));
+    }
+    return {std::move(boundStatement), node.getEntry(0)->getName()};
 }
 
 static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
@@ -82,61 +142,29 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     const auto tableOrGraphName = input->getLiteralVal<std::string>(0);
     auto indexName = input->getLiteralVal<std::string>(1);
     // Bind graph entry and node table entry
+    QueryHNSWConfig config{input->optionalParams};
     std::string tableName;
+    std::string witnessTableName;
     std::unique_ptr<BoundStatement> boundStatement;
     if (catalog->containsTable(transaction, tableOrGraphName)) {
         tableName = tableOrGraphName;
     } else if (graph::GraphEntrySet::Get(*context)->hasGraph(tableOrGraphName)) {
-        auto graphEntry = graph::GraphEntrySet::Get(*context)->getEntry(tableOrGraphName);
-        std::string cypherQuery;
-        if (graphEntry->type == graph::GraphEntryType::NATIVE) {
-            auto& nativeEntry = graphEntry->cast<graph::ParsedNativeGraphEntry>();
-            if (!nativeEntry.relInfos.empty() || nativeEntry.nodeInfos.size() != 1) {
-                throw BinderException(std::format("In vector filtered search, projected graph {} "
-                                                  "must contain exactly one node table.",
-                    tableOrGraphName));
-            }
-            auto nodeInfo = nativeEntry.nodeInfos[0];
-            cypherQuery = std::format("MATCH (n:`{}`) WHERE {} RETURN n", nodeInfo.tableName,
-                nodeInfo.predicate);
-        } else {
-            DASSERT(graphEntry->type == graph::GraphEntryType::CYPHER);
-            cypherQuery = graphEntry->cast<graph::ParsedCypherGraphEntry>().cypherQuery;
-        }
-        try {
-            auto parsedStatements = parser::Parser::parseQuery(cypherQuery);
-            DASSERT(parsedStatements.size() == 1);
-            auto binder = Binder(context);
-            boundStatement = binder.bind(*parsedStatements[0]);
-        } catch (Exception& e) {
-            // LCOV_EXCL_START
-            throw BinderException{
-                std::format("Failed to bind the filter query. Found error: {}", e.what())};
-            // LCOV_EXCL_STOP
-        }
-        auto resultColumns = boundStatement->getStatementResult()->getColumns();
-        if (resultColumns.size() != 1) {
-            throw BinderException(
-                std::format("The return clause of a filter query should contain "
-                            "exactly one node expression. Found more than one expressions: {}.",
-                    ExpressionUtil::toString(resultColumns)));
-        }
-        auto resultColumn = resultColumns[0];
-        if (resultColumn->getDataType().getLogicalTypeID() != LogicalTypeID::NODE) {
-            throw BinderException(std::format("The return clause of a filter query should be of "
-                                              "type NODE. Found type {} instead.",
-                resultColumn->getDataType().toString()));
-        }
-        auto& node = resultColumn->constCast<NodeExpression>();
-        if (node.getNumEntries() != 1) {
-            throw BinderException(std::format(
-                "Node {} in the return clause of the filter query should have one label.",
-                node.toString()));
-        }
-        tableName = node.getEntry(0)->getName();
+        std::tie(boundStatement, tableName) = bindFilterGraph(context, tableOrGraphName);
     } else {
         throw BinderException(
             std::format("Cannot find table or graph named as {}.", tableOrGraphName));
+    }
+    if (!config.witnessGraph.empty()) {
+        // TOWNSW: the filter selects witness nodes (e.g. venues), not indexed nodes.
+        if (boundStatement != nullptr) {
+            throw BinderException("With witness_graph, the first argument must be the indexed "
+                                  "table, not a projected graph.");
+        }
+        if (!graph::GraphEntrySet::Get(*context)->hasGraph(config.witnessGraph)) {
+            throw BinderException(
+                std::format("Cannot find graph named as {}.", config.witnessGraph));
+        }
+        std::tie(boundStatement, witnessTableName) = bindFilterGraph(context, config.witnessGraph);
     }
     auto nodeTableEntry = HNSWIndexUtils::bindNodeTable(*context, tableName);
     (void)HNSWIndexUtils::validateIndexExistence(*context, nodeTableEntry, indexName,
@@ -163,8 +191,11 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     bindData->queryExpression = input->params[2];
     bindData->kExpression = input->params[3];
     bindData->outputNode = outputNode;
-    bindData->config = QueryHNSWConfig{input->optionalParams};
+    bindData->config = config;
     bindData->filterStatement = std::move(boundStatement);
+    if (!witnessTableName.empty()) {
+        bindData->witnessTableEntry = catalog->getTableCatalogEntry(transaction, witnessTableName);
+    }
     context->setUseInternalCatalogEntry(false /* useInternalCatalogEntry */);
     return bindData;
 }
@@ -317,6 +348,7 @@ static offset_t tableFunc(const TableFuncInput& input, TableFuncOutput& output) 
         const auto dimension = ArrayType::getNumElements(
             getIndexColumnType(*bindData->nodeTableEntry, *bindData->indexEntry));
         auto indexType = index.getElementType();
+        const auto searchStart = std::chrono::steady_clock::now();
         TypeUtils::visit(
             indexType,
             [&]<VectorElementType T>(T) {
@@ -343,6 +375,15 @@ static offset_t tableFunc(const TableFuncInput& input, TableFuncOutput& output) 
                 }
             },
             [&](auto) { UNREACHABLE_CODE; });
+        auto& stats = *localState->searchState.stats;
+        stats.searchMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - searchStart)
+                             .count();
+        stats.numResults = localState->result->size();
+        stats.searchType = bindData->config.useKnn ?
+                               "naive" :
+                               StringUtils::getLower(bindData->config.searchType);
+        VectorSearchStats::publish(stats);
     }
     DASSERT(localState->result.has_value());
     if (localState->numRowsOutput >= localState->result->size()) {
@@ -411,9 +452,38 @@ std::unique_ptr<TableFuncLocalState> initQueryHNSWLocalState(
         true, std::move(quantizedEmbeddings)};
     const auto tableID = hnswBindData->nodeTableEntry->getTableID();
     auto& semiMasks = hnswSharedState->semiMasks;
-    if (semiMasks.containsTableID(tableID)) {
+    if (hnswBindData->witnessTableEntry != nullptr) {
+        const auto witnessTableID = hnswBindData->witnessTableEntry->getTableID();
+        if (semiMasks.containsTableID(witnessTableID)) {
+            semiMasks.pin(witnessTableID);
+            searchState.witnessMask = semiMasks.getPinnedMask();
+        }
+    } else if (semiMasks.containsTableID(tableID)) {
         semiMasks.pin(tableID);
         searchState.semiMask = semiMasks.getPinnedMask();
+    }
+    const auto& queryConfig = hnswBindData->config;
+    if (StringUtils::getLower(queryConfig.searchType) == "townsw") {
+        searchState.townsw = TownswData::getOrLoad(queryConfig.witnessIndex);
+        auto witnessRelEntry = catalog->getTableCatalogEntry(
+            transaction::Transaction::Get(*context), queryConfig.witnessRel, false);
+        const RelTableCatalogInfo* relInfo = nullptr;
+        if (witnessRelEntry->getType() == CatalogEntryType::REL_GROUP_ENTRY) {
+            relInfo =
+                witnessRelEntry->ptrCast<RelGroupCatalogEntry>()->getRelEntryInfo(tableID, tableID);
+        }
+        if (relInfo == nullptr) {
+            throw RuntimeException{std::format("witness_rel {} must be a relationship table from "
+                                               "{} to {}.",
+                queryConfig.witnessRel, hnswBindData->nodeTableEntry->getName(),
+                hnswBindData->nodeTableEntry->getName())};
+        }
+        searchState.witnessRelEntry = witnessRelEntry;
+        searchState.witnessRelTableID = relInfo->oid;
+        graph::NativeGraphEntry witnessGraphEntry{{hnswBindData->nodeTableEntry},
+            {witnessRelEntry}};
+        searchState.witnessGraph =
+            std::make_unique<graph::OnDiskGraph>(context, std::move(witnessGraphEntry));
     }
     return std::make_unique<QueryHNSWLocalState>(std::move(searchState));
 }
@@ -470,8 +540,11 @@ static std::unique_ptr<PhysicalOperator> getPhysicalPlan(PlanMapper* planMapper,
                         ->constPtrCast<QueryHNSWIndexBindData>();
     // Map node predicate pipeline
     if (bindData->filterStatement != nullptr) {
-        sharedState->semiMasks.addMask(bindData->nodeTableEntry->getTableID(),
-            SemiMaskUtil::createMask(bindData->numRows));
+        // The filter marks indexed nodes, or witness nodes for TOWNSW.
+        const auto maskTableID = bindData->witnessTableEntry != nullptr ?
+                                     bindData->witnessTableEntry->getTableID() :
+                                     bindData->nodeTableEntry->getTableID();
+        sharedState->semiMasks.addMask(maskTableID, SemiMaskUtil::createMask(bindData->numRows));
         planMapper->addOperatorMapping(logicalOp, op.get());
         DASSERT(logicalOp->getNumChildren() == 1);
         auto logicalRoot = logicalOp->getChild(0);

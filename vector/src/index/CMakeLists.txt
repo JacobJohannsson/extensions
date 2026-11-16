@@ -4,7 +4,8 @@ add_library(lbug_hnsw_index
         hnsw_index.cpp
         hnsw_index_utils.cpp
         hnsw_rel_batch_insert.cpp
-        hnsw_graph.cpp)
+        hnsw_graph.cpp
+        townsw.cpp)
 
 set(VECTOR_EXTENSION_OBJECT_FILES
         ${VECTOR_EXTENSION_OBJECT_FILES} $<TARGET_OBJECTS:lbug_hnsw_index>

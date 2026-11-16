@@ -146,6 +146,57 @@ struct UseKnn {
     static void validate(bool value);
 };
 
+// ---- TOWNSW (search_type := 'townsw'); see design.md, Section 12 ----
+
+// Projected graph whose query returns the selected witness nodes (e.g. venues). Without it,
+// every witness is selected.
+struct WitnessGraph {
+    static constexpr const char* NAME = "witness_graph";
+    static constexpr common::LogicalTypeID TYPE = common::LogicalTypeID::STRING;
+};
+
+// Relationship table from the indexed table to itself that holds the per-witness NSW edges.
+struct WitnessRel {
+    static constexpr const char* NAME = "witness_rel";
+    static constexpr common::LogicalTypeID TYPE = common::LogicalTypeID::STRING;
+};
+
+// Path of the file built by scripts/build_index.py (node-to-witness array, leaves, tree).
+struct WitnessIndex {
+    static constexpr const char* NAME = "witness_index";
+    static constexpr common::LogicalTypeID TYPE = common::LogicalTypeID::STRING;
+};
+
+// Number of leaves used as start points before the search begins.
+struct InitLeaves {
+    static constexpr const char* NAME = "init_leaves";
+    static constexpr common::LogicalTypeID TYPE = common::LogicalTypeID::INT64;
+    static constexpr int64_t DEFAULT_VALUE = 4;
+};
+
+// Once the beam is full and stalls, keep taking further leaves as start points until this many
+// in a row add nothing. 0 means the tree is only used at the start.
+struct LeafPatience {
+    static constexpr const char* NAME = "leaf_patience";
+    static constexpr common::LogicalTypeID TYPE = common::LogicalTypeID::INT64;
+    static constexpr int64_t DEFAULT_VALUE = 0;
+};
+
+// Walk greedily from a leaf's best entry node toward the query before seeding the beam.
+struct LeafDescent {
+    static constexpr const char* NAME = "leaf_descent";
+    static constexpr common::LogicalTypeID TYPE = common::LogicalTypeID::BOOL;
+    static constexpr bool DEFAULT_VALUE = true;
+};
+
+// Skip a node's witness NSW edges when at least this fraction of its lower-layer neighbors is
+// selected. Values above 1 never skip.
+struct WitnessEdgeSel {
+    static constexpr const char* NAME = "witness_edge_sel";
+    static constexpr common::LogicalTypeID TYPE = common::LogicalTypeID::DOUBLE;
+    static constexpr double DEFAULT_VALUE = 2.0;
+};
+
 struct HNSWIndexConfig {
     int64_t mu = Mu::DEFAULT_VALUE;
     int64_t ml = Ml::DEFAULT_VALUE;
@@ -197,6 +248,13 @@ struct QueryHNSWConfig {
     double directedSearchUpSelThreshold = DirectedSearchUpSelThreshold::DEFAULT_VALUE;
     std::string searchType = SearchTypeParam::DEFAULT_VALUE;
     bool useKnn = UseKnn::DEFAULT_VALUE;
+    std::string witnessGraph;
+    std::string witnessRel;
+    std::string witnessIndex;
+    int64_t initLeaves = InitLeaves::DEFAULT_VALUE;
+    int64_t leafPatience = LeafPatience::DEFAULT_VALUE;
+    bool leafDescent = LeafDescent::DEFAULT_VALUE;
+    double witnessEdgeSel = WitnessEdgeSel::DEFAULT_VALUE;
 
     QueryHNSWConfig() = default;
 

@@ -155,6 +155,10 @@ static bool isBruteForceSearch(const QueryHNSWConfig& config) {
     return config.useKnn || common::StringUtils::getLower(config.searchType) == "naive";
 }
 
+static bool isTownswSearch(const QueryHNSWConfig& config) {
+    return common::StringUtils::getLower(config.searchType) == "townsw";
+}
+
 std::vector<NodeWithDistance> InMemHNSWLayer::searchKNN(const EmbeddingHandle& queryVector,
     common::offset_t entryNode, common::length_t k, uint64_t configuredEf, VisitedState& visited,
     GetEmbeddingsScanState& scanState) const {
@@ -474,7 +478,13 @@ HNSWSearchState::HNSWSearchState(main::ClientContext* context,
             nodeTable, columnID);
         embeddingScanState = embeddings->constructScanState(transaction);
     }
-    metricFunc = embeddings->getMetricFunction(indexConfig.metric);
+    stats = std::make_shared<VectorSearchStats>();
+    // Count every distance computation, whichever search mode makes it.
+    metricFunc = [inner = embeddings->getMetricFunction(indexConfig.metric), counters = stats](
+                     const void* left, const void* right, uint32_t dimension) {
+        counters->distances++;
+        return inner(left, right, dimension);
+    };
     ef = std::max(k, static_cast<uint64_t>(config.efs));
     graph::NativeGraphEntry lowerGraphEntry{{nodeTableEntry}, {lowerRelTableEntry}};
     lowerGraph = std::make_unique<graph::OnDiskGraph>(context, std::move(lowerGraphEntry));
@@ -597,6 +607,9 @@ std::vector<NodeWithDistance> OnDiskHNSWIndex::search(Transaction* transaction,
         auto result = searchBruteForce(transaction, queryVector, exactQueryVector, searchState);
         result.resize(std::min<uint64_t>(result.size(), searchState.k));
         return result;
+    }
+    if (isTownswSearch(searchState.config)) {
+        return searchTownsw(transaction, queryVector, searchState);
     }
     auto result = searchFromCheckpointed(transaction, queryVector, searchState);
     searchFromUnCheckpointed(transaction, queryVector, searchState, result);
@@ -942,6 +955,7 @@ common::offset_t OnDiskHNSWIndex::searchNNInUpperLayer(const EmbeddingHandle& qu
         hnswStorageInfo.upperRelTableID, indexInfo.tableID, {} /* relProperties */);
     while (minDist < lastMinDist) {
         lastMinDist = minDist;
+        searchState.stats->listsScanned++;
         auto neighborItr = searchState.upperGraph->scanFwd(
             common::nodeID_t{currentNodeOffset, indexInfo.tableID}, *scanState);
         for (const auto neighborChunk : neighborItr) {
@@ -1018,6 +1032,8 @@ std::vector<NodeWithDistance> OnDiskHNSWIndex::searchKNNInLayer(Transaction* tra
             break;
         }
         candidates.pop();
+        searchState.stats->expansions++;
+        searchState.stats->listsScanned++;
         const auto& hnswGraph = isUpperLayer ? searchState.upperGraph : searchState.lowerGraph;
         auto neighborItr = hnswGraph->scanFwd(common::nodeID_t{candidate, indexInfo.tableID},
             *searchState.nbrScanState);
@@ -1217,6 +1233,7 @@ void OnDiskHNSWIndex::randomFilteredSearch(const EmbeddingHandle& queryVector,
             continue;
         }
         searchState.visited.add(nbrToExplore);
+        searchState.stats->listsScanned++;
         auto secondHopNbrItr = searchState.lowerGraph->scanFwd(
             common::nodeID_t{nbrToExplore, indexInfo.tableID}, *searchState.secondHopNbrScanState);
         for (const auto& secondHopNbrChunk : secondHopNbrItr) {
@@ -1552,6 +1569,7 @@ bool OnDiskHNSWIndex::searchOverSecondHopNbrs(const EmbeddingHandle& queryVector
         return true;
     }
     searchState.visited.add(cand);
+    searchState.stats->listsScanned++;
     // Second hop lookups from the current node.
     auto secondHopNbrItr = searchState.lowerGraph->scanFwd(
         common::nodeID_t{cand, indexInfo.tableID}, *searchState.secondHopNbrScanState);

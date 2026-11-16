@@ -31,6 +31,7 @@ void VectorExtension::load(main::ClientContext* context) {
     auto& db = *context->getDatabase();
     extension::ExtensionUtils::addTableFunc<QueryVectorIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<AnnSearchFunction>(db);
+    extension::ExtensionUtils::addTableFunc<VectorSearchStatsFunction>(db);
     extension::ExtensionUtils::addInternalStandaloneTableFunc<InternalCreateHNSWIndexFunction>(db);
     extension::ExtensionUtils::addInternalStandaloneTableFunc<InternalFinalizeHNSWIndexFunction>(
         db);

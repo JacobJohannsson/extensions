@@ -87,11 +87,11 @@ void SearchTypeParam::validate(const std::string& value) {
     if (lowerCaseValue != "auto" && lowerCaseValue != "navix" && lowerCaseValue != "adaptive_l" &&
         lowerCaseValue != "adaptive_g" && lowerCaseValue != "blind" &&
         lowerCaseValue != "directed" && lowerCaseValue != "one_hop" && lowerCaseValue != "onehop" &&
-        lowerCaseValue != "naive" && lowerCaseValue != "random") {
+        lowerCaseValue != "naive" && lowerCaseValue != "random" && lowerCaseValue != "townsw") {
         throw common::BinderException{
             std::format("Unsupported vector search_type '{}'. Ladybug currently supports AUTO, "
-                        "NAVIX, ADAPTIVE_L, ADAPTIVE_G, BLIND, DIRECTED, ONE_HOP, NAIVE, and "
-                        "RANDOM.",
+                        "NAVIX, ADAPTIVE_L, ADAPTIVE_G, BLIND, DIRECTED, ONE_HOP, NAIVE, "
+                        "RANDOM, and TOWNSW.",
                 value)};
     }
 }
@@ -331,10 +331,42 @@ QueryHNSWConfig::QueryHNSWConfig(const function::optional_params_t& optionalPara
             value.validateType(UseKnn::TYPE);
             useKnn = value.getValue<bool>();
             UseKnn::validate(useKnn);
+        } else if (WitnessGraph::NAME == lowerCaseName) {
+            value.validateType(WitnessGraph::TYPE);
+            witnessGraph = value.getValue<std::string>();
+        } else if (WitnessRel::NAME == lowerCaseName) {
+            value.validateType(WitnessRel::TYPE);
+            witnessRel = value.getValue<std::string>();
+        } else if (WitnessIndex::NAME == lowerCaseName) {
+            value.validateType(WitnessIndex::TYPE);
+            witnessIndex = value.getValue<std::string>();
+        } else if (InitLeaves::NAME == lowerCaseName) {
+            value.validateType(InitLeaves::TYPE);
+            initLeaves = value.getValue<int64_t>();
+        } else if (LeafPatience::NAME == lowerCaseName) {
+            value.validateType(LeafPatience::TYPE);
+            leafPatience = value.getValue<int64_t>();
+        } else if (LeafDescent::NAME == lowerCaseName) {
+            value.validateType(LeafDescent::TYPE);
+            leafDescent = value.getValue<bool>();
+        } else if (WitnessEdgeSel::NAME == lowerCaseName) {
+            value.validateType(WitnessEdgeSel::TYPE);
+            witnessEdgeSel = value.getValue<double>();
         } else {
             throw common::BinderException{std::format("Unrecognized optional parameter {} in {}.",
                 name, QueryVectorIndexFunction::name)};
         }
+    }
+    const auto isTownsw = common::StringUtils::getLower(searchType) == "townsw";
+    if (isTownsw && (witnessRel.empty() || witnessIndex.empty())) {
+        throw common::BinderException{
+            "search_type 'townsw' needs the witness_rel and witness_index parameters."};
+    }
+    if (!isTownsw && !witnessGraph.empty()) {
+        throw common::BinderException{"witness_graph can only be used with search_type 'townsw'."};
+    }
+    if (initLeaves < 1 || leafPatience < 0) {
+        throw common::BinderException{"init_leaves must be at least 1 and leaf_patience at least 0."};
     }
     if (blindSearchUpSelThreshold >= directedSearchUpSelThreshold) {
         throw common::BinderException{std::format(
